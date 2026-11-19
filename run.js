@@ -9,7 +9,7 @@ const crypto = require('crypto');
 const { Database } = require('./src/db');
 const { createServices } = require('./src/services');
 const { checkWallets } = require('./src/wallets');
-const { createSync } = require('./src/sync');
+const { createSync, FirebaseClient } = require('./src/sync');
 const firebaseConfig = require('./src/firebase-config');
 
 const DIR = path.join(__dirname, 'veri');
@@ -19,8 +19,8 @@ const env = (k) => (process.env[k] || '').trim();
 
 function keyBytes() {
   // Ayrı anahtar verilmezse giriş anahtarından türetilir (tek secret yeterli)
-  const k = env('FALCON_DB_KEY') || (env('FALCON_REFRESH_TOKEN') && `falcon-veri:${env('FALCON_REFRESH_TOKEN')}`);
-  if (!k) throw new Error('FALCON_REFRESH_TOKEN yok');
+  const k = env('FALCON_DB_KEY') || (env('FALCON_PASSWORD') && `falcon-veri:${env('FALCON_EMAIL')}:${env('FALCON_PASSWORD')}`);
+  if (!k) throw new Error('FALCON_PASSWORD secret tanımlı değil');
   return crypto.createHash('sha256').update(k).digest();
 }
 function decrypt() {
@@ -52,6 +52,10 @@ function skipFiles(db) {
 }
 
 async function main() {
+  if (!env('FALCON_PASSWORD') && !env('FALCON_DB_KEY')) {
+    console.log('FALCON_PASSWORD secret henüz tanımlı değil; bu tur atlandı.');
+    return;
+  }
   fs.mkdirSync(DIR, { recursive: true });
   const restored = decrypt();
   const db = await new Database(DB, { backupDir: path.join(DIR, 'yedek') }).open();
@@ -59,14 +63,18 @@ async function main() {
   const sync = createSync({ db, fetch: (u, o) => fetch(u, o), files, defaults: firebaseConfig, deviceName: 'Bulut', log, intervalMs: 3600000 });
   const meta = (k) => db.get('SELECT value FROM sync_meta WHERE key = ?', [k])?.value ?? null;
   if (!meta('refresh_token')) {
-    const rt = env('FALCON_REFRESH_TOKEN');
-    if (!rt) throw new Error('FALCON_REFRESH_TOKEN yok');
+    // İlk kurulum: programdaki eşitleme hesabıyla giriş yapılır (e-posta + şifre secret'tan)
+    const apiKey = env('FALCON_API_KEY') || 'AIzaSyC-inCIkHTOTu_73azseJeXQO1fLYihv_0';
+    const projectId = env('FALCON_PROJECT_ID') || 'falcon-ofis';
+    const c = new FirebaseClient({ apiKey, projectId, fetch: (u, o) => fetch(u, o) });
+    const auth = await c.signIn(env('FALCON_EMAIL'), env('FALCON_PASSWORD'));
     const put = (k, v) => db.db.run('INSERT INTO sync_meta (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value', [k, v]);
     db.tx(() => {
-      put('refresh_token', rt);
-      put('uid', env('FALCON_UID'));
-      put('api_key', env('FALCON_API_KEY') || 'AIzaSyC-inCIkHTOTu_73azseJeXQO1fLYihv_0');
-      put('project_id', env('FALCON_PROJECT_ID') || 'falcon-ofis');
+      put('refresh_token', c.refreshToken);
+      put('uid', auth.uid);
+      put('email', auth.email);
+      put('api_key', apiKey);
+      put('project_id', projectId);
       put('device_id', `bulut${crypto.randomBytes(5).toString('hex')}`);
       put('device_name', 'Bulut (GitHub)');
     });
