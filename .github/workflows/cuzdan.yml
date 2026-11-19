@@ -1,0 +1,38 @@
+name: Cüzdan izleyici
+on:
+  schedule:
+    - cron: '*/5 * * * *'
+  workflow_dispatch:
+concurrency:
+  group: cuzdan
+  cancel-in-progress: false
+permissions:
+  contents: read
+jobs:
+  kontrol:
+    runs-on: ubuntu-latest
+    timeout-minutes: 8
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - run: npm install --omit=dev --no-audit --no-fund
+      - name: Kayıt defterini geri yükle
+        uses: actions/cache/restore@v4
+        with:
+          path: veri/falcon.db.enc
+          key: falcon-veri-${{ github.run_id }}
+          restore-keys: falcon-veri-
+      - name: Cüzdanları kontrol et ve eşitle
+        run: node run.js
+        env:
+          FALCON_REFRESH_TOKEN: ${{ secrets.FALCON_REFRESH_TOKEN }}
+          FALCON_UID: ${{ secrets.FALCON_UID }}
+          FALCON_DB_KEY: ${{ secrets.FALCON_DB_KEY }}
+      - name: Kayıt defterini sakla
+        if: always() && hashFiles('veri/falcon.db.enc') != ''
+        uses: actions/cache/save@v4
+        with:
+          path: veri/falcon.db.enc
+          key: falcon-veri-${{ github.run_id }}
