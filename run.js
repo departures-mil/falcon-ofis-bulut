@@ -18,8 +18,9 @@ const ENC = path.join(DIR, 'falcon.db.enc');
 const env = (k) => (process.env[k] || '').trim();
 
 function keyBytes() {
-  const k = env('FALCON_DB_KEY');
-  if (!k) throw new Error('FALCON_DB_KEY yok');
+  // Ayrı anahtar verilmezse giriş anahtarından türetilir (tek secret yeterli)
+  const k = env('FALCON_DB_KEY') || (env('FALCON_REFRESH_TOKEN') && `falcon-veri:${env('FALCON_REFRESH_TOKEN')}`);
+  if (!k) throw new Error('FALCON_REFRESH_TOKEN yok');
   return crypto.createHash('sha256').update(k).digest();
 }
 function decrypt() {

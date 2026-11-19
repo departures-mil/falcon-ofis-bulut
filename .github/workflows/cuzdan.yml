@@ -28,8 +28,7 @@ jobs:
         run: node run.js
         env:
           FALCON_REFRESH_TOKEN: ${{ secrets.FALCON_REFRESH_TOKEN }}
-          FALCON_UID: ${{ secrets.FALCON_UID }}
-          FALCON_DB_KEY: ${{ secrets.FALCON_DB_KEY }}
+          FALCON_UID: 4fxnQ9VFlPQvWlXcNLSW1BOvl7v1
       - name: Kayıt defterini sakla
         if: always() && hashFiles('veri/falcon.db.enc') != ''
         uses: actions/cache/save@v4
