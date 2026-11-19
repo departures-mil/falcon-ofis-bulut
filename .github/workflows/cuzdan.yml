@@ -27,8 +27,8 @@ jobs:
       - name: Cüzdanları kontrol et ve eşitle
         run: node run.js
         env:
-          FALCON_REFRESH_TOKEN: ${{ secrets.FALCON_REFRESH_TOKEN }}
-          FALCON_UID: 4fxnQ9VFlPQvWlXcNLSW1BOvl7v1
+          FALCON_EMAIL: qa757939@gmail.com
+          FALCON_PASSWORD: ${{ secrets.FALCON_PASSWORD }}
       - name: Kayıt defterini sakla
         if: always() && hashFiles('veri/falcon.db.enc') != ''
         uses: actions/cache/save@v4
