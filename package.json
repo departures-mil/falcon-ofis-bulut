@@ -1,0 +1,8 @@
+{
+  "name": "falcon-ofis-bulut",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Falcon Ofis kripto cüzdan bulut izleyici",
+  "main": "run.js",
+  "dependencies": { "sql.js": "1.17.0" }
+}
