@@ -780,3 +780,15 @@ migrations.push({
     CREATE INDEX idx_recurring_files_payment ON recurring_files(payment_id);
   `,
 });
+
+migrations.push({
+  version: 25,
+  name: 'v1.47-son-uyari',
+  sql: `
+    -- v1.47: Son uyarı (gün + saat, YYYY-MM-DDTHH:MM). O an gelince ödeme hâlâ yapılmadıysa son kez bildirim verilir.
+    -- Ödendi işaretlenince sıradaki tarih gibi bir dönem ileri alınır (prev_final → new_final), geri alınınca döner.
+    ALTER TABLE recurring_plans ADD COLUMN final_at TEXT;
+    ALTER TABLE recurring_payments ADD COLUMN prev_final TEXT;
+    ALTER TABLE recurring_payments ADD COLUMN new_final TEXT;
+  `,
+});

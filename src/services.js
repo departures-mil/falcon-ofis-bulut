@@ -1942,7 +1942,17 @@ function createServices(db, { removeFile = () => {} } = {}) {
     return out.length ? JSON.stringify(out) : null;
   }
 
-  function saveRecurringPlan({ id, kind, title, recipient, amount, currency, period_unit, period_count, next_date, remind_days, active, account_no, contacts, note, qr, removeQr }) {
+  // Son uyarı: YYYY-MM-DDTHH:MM (saat yoksa 09:00)
+  function normFinal(v) {
+    const t = optText(v);
+    if (!t) return null;
+    const m = /^(\d{4}-\d{2}-\d{2})(?:[T ](\d{1,2}):(\d{2}))?/.exec(t);
+    if (!m) throw new AppError('ERR_REQUIRED');
+    return `${m[1]}T${String(m[2] ?? '9').padStart(2, '0')}:${m[3] ?? '00'}`;
+  }
+  const advanceFinal = (fin, unit, count) => (fin ? `${advanceDate(fin.slice(0, 10), unit, count)}${fin.slice(10)}` : null);
+
+  function saveRecurringPlan({ id, kind, title, recipient, amount, currency, period_unit, period_count, next_date, remind_days, active, account_no, contacts, note, qr, removeQr, final_at }) {
     const k = PLAN_KINDS.includes(kind) ? kind : 'infak';
     const t = required(title);
     const amt = amount === '' || amount === null || amount === undefined ? null : nonNegative(amount);
@@ -1956,11 +1966,12 @@ function createServices(db, { removeFile = () => {} } = {}) {
       if (!old) throw new AppError('ERR_NOT_FOUND');
       db.run(`UPDATE recurring_plans SET kind=?, title=?, recipient=?, amount=?, currency_code=?, period_unit=?, period_count=?, next_date=?, remind_days=?, active=?, account_no=?, contacts=?, note=?, qr_path=?, updated_at=${now} WHERE id=?`,
         [...vals, replaceFile(old.qr_path, qr, removeQr), id]);
+      if (final_at !== undefined) db.run('UPDATE recurring_plans SET final_at = ? WHERE id = ?', [normFinal(final_at), id]);
       return { id };
     }
     return {
-      id: db.run(`INSERT INTO recurring_plans (kind, title, recipient, amount, currency_code, period_unit, period_count, next_date, remind_days, active, account_no, contacts, note, qr_path, updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,${now})`,
-        [...vals, qr || null]).lastInsertRowid,
+      id: db.run(`INSERT INTO recurring_plans (kind, title, recipient, amount, currency_code, period_unit, period_count, next_date, remind_days, active, account_no, contacts, note, qr_path, final_at, updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,${now})`,
+        [...vals, qr || null, normFinal(final_at)]).lastInsertRowid,
     };
   }
 
@@ -2009,11 +2020,13 @@ function createServices(db, { removeFile = () => {} } = {}) {
     if (paid && !p.new_next) {
       const from = plan.next_date || p.date;
       const next = advanceDate(from, plan.period_unit, plan.period_count);
-      db.run(`UPDATE recurring_payments SET paid = 1, prev_next = ?, new_next = ?, updated_at=${now} WHERE id = ?`, [plan.next_date, next, payId]);
-      db.run(`UPDATE recurring_plans SET next_date = ?, updated_at=${now} WHERE id = ?`, [next, plan.id]);
+      const fin = advanceFinal(plan.final_at, plan.period_unit, plan.period_count);
+      db.run(`UPDATE recurring_payments SET paid = 1, prev_next = ?, new_next = ?, prev_final = ?, new_final = ?, updated_at=${now} WHERE id = ?`, [plan.next_date, next, plan.final_at, fin, payId]);
+      db.run(`UPDATE recurring_plans SET next_date = ?, final_at = ?, updated_at=${now} WHERE id = ?`, [next, fin, plan.id]);
     } else if (!paid && p.new_next) {
       if (plan.next_date === p.new_next) db.run(`UPDATE recurring_plans SET next_date = ?, updated_at=${now} WHERE id = ?`, [p.prev_next, plan.id]);
-      db.run(`UPDATE recurring_payments SET paid = 0, prev_next = NULL, new_next = NULL, updated_at=${now} WHERE id = ?`, [payId]);
+      if (p.new_final && plan.final_at === p.new_final) db.run(`UPDATE recurring_plans SET final_at = ?, updated_at=${now} WHERE id = ?`, [p.prev_final, plan.id]);
+      db.run(`UPDATE recurring_payments SET paid = 0, prev_next = NULL, new_next = NULL, prev_final = NULL, new_final = NULL, updated_at=${now} WHERE id = ?`, [payId]);
     } else {
       db.run(`UPDATE recurring_payments SET paid = ?, updated_at=${now} WHERE id = ?`, [paid ? 1 : 0, payId]);
     }
