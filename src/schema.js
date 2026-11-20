@@ -718,3 +718,65 @@ migrations.push({
     ALTER TABLE crypto_wallets_v143 RENAME TO crypto_wallets;
   `,
 });
+
+migrations.push({
+  version: 24,
+  name: 'v1.46-duzenli-odemeler',
+  sql: `
+    -- v1.46: Düzenli ödemeler. kind = 'infak' (Finans > Düzenli İnfak) ya da 'aidat' (Sistem > Aidat).
+    -- title: nereye / ne için, recipient: kime. Sıklık period_count × period_unit (day | week | month | year).
+    -- next_date: sıradaki ödeme (hatırlatma) tarihi; remind_days gün önceden hatırlatılır. active = 0: hatırlatma yok.
+    -- qr_path: Sham Cash hesabının QR kodu, account_no: Sham Cash hesap numarası / adresi.
+    -- contacts: JSON [{"label":"…","number":"…","apps":["whatsapp","telegram","signal","shamcash","call"]}]
+    CREATE TABLE recurring_plans (
+      id            INTEGER PRIMARY KEY AUTOINCREMENT,
+      kind          TEXT NOT NULL DEFAULT 'infak',
+      title         TEXT NOT NULL,
+      recipient     TEXT,
+      amount        REAL,
+      currency_code TEXT,
+      period_unit   TEXT NOT NULL DEFAULT 'month',
+      period_count  INTEGER NOT NULL DEFAULT 1,
+      next_date     TEXT,
+      remind_days   INTEGER NOT NULL DEFAULT 3,
+      active        INTEGER NOT NULL DEFAULT 1,
+      qr_path       TEXT,
+      account_no    TEXT,
+      contacts      TEXT,
+      note          TEXT,
+      created_at    TEXT NOT NULL DEFAULT (datetime('now','localtime')),
+      updated_at    TEXT
+    );
+    CREATE INDEX idx_recurring_plans_kind ON recurring_plans(kind, next_date);
+    -- Ödeme kayıtları. paid = 1 ödendi (sıradaki tarih ileri alınır: prev_next → new_next), 0 = bekliyor.
+    -- record_cash = 1: kasadan düşülür (cash_transaction_id). gift_id: İnfak listesine de yazıldıysa o kayıt.
+    CREATE TABLE recurring_payments (
+      id                  INTEGER PRIMARY KEY AUTOINCREMENT,
+      plan_id             INTEGER NOT NULL,
+      date                TEXT NOT NULL,
+      amount              REAL,
+      currency_code       TEXT,
+      paid                INTEGER NOT NULL DEFAULT 1,
+      prev_next           TEXT,
+      new_next            TEXT,
+      record_cash         INTEGER NOT NULL DEFAULT 0,
+      add_gift            INTEGER NOT NULL DEFAULT 0,
+      cash_transaction_id INTEGER,
+      gift_id             INTEGER,
+      note                TEXT,
+      created_at          TEXT NOT NULL DEFAULT (datetime('now','localtime')),
+      updated_at          TEXT
+    );
+    CREATE INDEX idx_recurring_payments_plan ON recurring_payments(plan_id, date);
+    -- Ödemenin dekontları (kamera / galeri / dosya), bir ödemeye birden fazla
+    CREATE TABLE recurring_files (
+      id            INTEGER PRIMARY KEY AUTOINCREMENT,
+      payment_id    INTEGER NOT NULL,
+      file_path     TEXT NOT NULL,
+      original_name TEXT,
+      mime_type     TEXT,
+      created_at    TEXT NOT NULL DEFAULT (datetime('now','localtime'))
+    );
+    CREATE INDEX idx_recurring_files_payment ON recurring_files(payment_id);
+  `,
+});

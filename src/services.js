@@ -1913,6 +1913,170 @@ function createServices(db, { removeFile = () => {} } = {}) {
     return { ok: true };
   }
 
+  // ---------- v1.46: düzenli ödemeler (Düzenli İnfak, Aidat) ----------
+
+  const PERIOD_UNITS = ['day', 'week', 'month', 'year'];
+  const PLAN_KINDS = ['infak', 'aidat'];
+  const CONTACT_APPS = ['whatsapp', 'telegram', 'signal', 'shamcash', 'call', 'sms'];
+
+  // Sıradaki tarih: gün / hafta / ay / yıl ekleme (ay sonunda taşma olmaz)
+  function advanceDate(dateStr, unit, count) {
+    const n = Math.max(1, Math.round(Number(count) || 1));
+    if (unit === 'month') return addMonths(dateStr, n);
+    if (unit === 'year') return addMonths(dateStr, 12 * n);
+    const [y, m, d] = String(dateStr).slice(0, 10).split('-').map(Number);
+    const t = new Date(Date.UTC(y, m - 1, d + (unit === 'week' ? 7 * n : n)));
+    return t.toISOString().slice(0, 10);
+  }
+
+  function cleanPlanContacts(list) {
+    if (!Array.isArray(list)) return null;
+    const out = [];
+    for (const c of list) {
+      const number = optText(c?.number);
+      const label = optText(c?.label);
+      if (!number && !label) continue;
+      const apps = Array.isArray(c?.apps) ? CONTACT_APPS.filter((a) => c.apps.includes(a)) : [];
+      out.push({ label: label || '', number: number || '', apps });
+    }
+    return out.length ? JSON.stringify(out) : null;
+  }
+
+  function saveRecurringPlan({ id, kind, title, recipient, amount, currency, period_unit, period_count, next_date, remind_days, active, account_no, contacts, note, qr, removeQr }) {
+    const k = PLAN_KINDS.includes(kind) ? kind : 'infak';
+    const t = required(title);
+    const amt = amount === '' || amount === null || amount === undefined ? null : nonNegative(amount);
+    const cur = amt !== null ? required(currency) : (optText(currency) || null);
+    const unit = PERIOD_UNITS.includes(period_unit) ? period_unit : 'month';
+    const count = Math.max(1, Math.min(365, Math.round(Number(period_count) || 1)));
+    const days = Math.max(0, Math.min(60, Math.round(Number(remind_days ?? 3)) || 0));
+    const vals = [k, t, optText(recipient), amt, cur, unit, count, optText(next_date), days, active === undefined || active ? 1 : 0, optText(account_no), cleanPlanContacts(contacts), optText(note)];
+    if (id) {
+      const old = db.get('SELECT * FROM recurring_plans WHERE id = ?', [id]);
+      if (!old) throw new AppError('ERR_NOT_FOUND');
+      db.run(`UPDATE recurring_plans SET kind=?, title=?, recipient=?, amount=?, currency_code=?, period_unit=?, period_count=?, next_date=?, remind_days=?, active=?, account_no=?, contacts=?, note=?, qr_path=?, updated_at=${now} WHERE id=?`,
+        [...vals, replaceFile(old.qr_path, qr, removeQr), id]);
+      return { id };
+    }
+    return {
+      id: db.run(`INSERT INTO recurring_plans (kind, title, recipient, amount, currency_code, period_unit, period_count, next_date, remind_days, active, account_no, contacts, note, qr_path, updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,${now})`,
+        [...vals, qr || null]).lastInsertRowid,
+    };
+  }
+
+  function setRecurringActive({ id, active }) {
+    db.run(`UPDATE recurring_plans SET active = ?, updated_at=${now} WHERE id = ?`, [active ? 1 : 0, id]);
+    return { ok: true };
+  }
+
+  // Ödendi işaretli ödemenin kasa / İnfak kayıtları (ödenmemişte hiçbiri yoktur)
+  function syncPaymentLinks(payId) {
+    const p = db.get('SELECT * FROM recurring_payments WHERE id = ?', [payId]);
+    const plan = db.get('SELECT * FROM recurring_plans WHERE id = ?', [p.plan_id]);
+    const live = p.paid && p.amount > 0 && p.currency_code;
+    const desc = [plan.title, plan.recipient && plan.recipient !== plan.title ? plan.recipient : null, p.note].filter(Boolean).join(' · ');
+    // İnfak listesine (gifts) yazılırsa kasa kaydını o tutar
+    if (live && p.add_gift && plan.kind === 'infak') {
+      const g = saveGift({
+        id: p.gift_id && db.get('SELECT id FROM gifts WHERE id = ?', [p.gift_id]) ? p.gift_id : undefined,
+        person: { name: plan.recipient || plan.title }, amount: p.amount, currency: p.currency_code, date: p.date,
+        description: desc, record_cash: !!p.record_cash,
+      });
+      if (p.cash_transaction_id) deleteTx(p.cash_transaction_id);
+      db.run('UPDATE recurring_payments SET gift_id = ?, cash_transaction_id = NULL WHERE id = ?', [g.id, payId]);
+      return;
+    }
+    if (p.gift_id) {
+      deleteGift({ id: p.gift_id });
+      db.run('UPDATE recurring_payments SET gift_id = NULL WHERE id = ?', [payId]);
+    }
+    if (live && p.record_cash) {
+      const txId = upsertLinkedTx(p.cash_transaction_id, {
+        currency: p.currency_code, direction: 'out', amount: p.amount, date: p.date, category: plan.kind === 'infak' ? 'gift' : 'bill', personId: null,
+        description: desc, relatedType: 'recurring', relatedId: payId,
+      });
+      db.run('UPDATE recurring_payments SET cash_transaction_id = ? WHERE id = ?', [txId, payId]);
+    } else if (p.cash_transaction_id) {
+      deleteTx(p.cash_transaction_id);
+      db.run('UPDATE recurring_payments SET cash_transaction_id = NULL WHERE id = ?', [payId]);
+    }
+  }
+
+  // Ödendi: sıradaki tarih bir dönem ileri alınır. Geri alınınca (tarih hâlâ o ise) eski hâline döner.
+  function applyPaidState(payId, paid) {
+    const p = db.get('SELECT * FROM recurring_payments WHERE id = ?', [payId]);
+    const plan = db.get('SELECT * FROM recurring_plans WHERE id = ?', [p.plan_id]);
+    if (paid && !p.new_next) {
+      const from = plan.next_date || p.date;
+      const next = advanceDate(from, plan.period_unit, plan.period_count);
+      db.run(`UPDATE recurring_payments SET paid = 1, prev_next = ?, new_next = ?, updated_at=${now} WHERE id = ?`, [plan.next_date, next, payId]);
+      db.run(`UPDATE recurring_plans SET next_date = ?, updated_at=${now} WHERE id = ?`, [next, plan.id]);
+    } else if (!paid && p.new_next) {
+      if (plan.next_date === p.new_next) db.run(`UPDATE recurring_plans SET next_date = ?, updated_at=${now} WHERE id = ?`, [p.prev_next, plan.id]);
+      db.run(`UPDATE recurring_payments SET paid = 0, prev_next = NULL, new_next = NULL, updated_at=${now} WHERE id = ?`, [payId]);
+    } else {
+      db.run(`UPDATE recurring_payments SET paid = ?, updated_at=${now} WHERE id = ?`, [paid ? 1 : 0, payId]);
+    }
+    syncPaymentLinks(payId);
+  }
+
+  function saveRecurringPayment({ id, plan_id, date, amount, currency, paid = true, record_cash = false, add_gift = false, note, newFiles = [], removeFileIds = [] }) {
+    const d = required(date);
+    const amt = amount === '' || amount === null || amount === undefined ? null : nonNegative(amount);
+    const cur = amt !== null ? required(currency) : (optText(currency) || null);
+    let payId = id;
+    if (id) {
+      const old = db.get('SELECT * FROM recurring_payments WHERE id = ?', [id]);
+      if (!old) throw new AppError('ERR_NOT_FOUND');
+      db.run(`UPDATE recurring_payments SET date=?, amount=?, currency_code=?, record_cash=?, add_gift=?, note=?, updated_at=${now} WHERE id=?`,
+        [d, amt, cur, record_cash ? 1 : 0, add_gift ? 1 : 0, optText(note), id]);
+    } else {
+      if (!db.get('SELECT id FROM recurring_plans WHERE id = ?', [plan_id])) throw new AppError('ERR_NOT_FOUND');
+      payId = db.run(`INSERT INTO recurring_payments (plan_id, date, amount, currency_code, paid, record_cash, add_gift, note, updated_at) VALUES (?,?,?,?,0,?,?,?,${now})`,
+        [plan_id, d, amt, cur, record_cash ? 1 : 0, add_gift ? 1 : 0, optText(note)]).lastInsertRowid;
+    }
+    for (const f of newFiles || []) {
+      db.run('INSERT INTO recurring_files (payment_id, file_path, original_name, mime_type) VALUES (?,?,?,?)', [payId, required(f.relPath), f.originalName ?? null, f.mime ?? null]);
+    }
+    for (const fid of removeFileIds || []) {
+      const r = db.get('SELECT file_path FROM recurring_files WHERE id = ? AND payment_id = ?', [fid, payId]);
+      if (!r) continue;
+      pendingRemovals.push(r.file_path);
+      db.run('DELETE FROM recurring_files WHERE id = ?', [fid]);
+    }
+    applyPaidState(payId, !!paid);
+    return { id: payId, next_date: db.get('SELECT p.next_date FROM recurring_plans p JOIN recurring_payments x ON x.plan_id = p.id WHERE x.id = ?', [payId])?.next_date ?? null };
+  }
+
+  function setRecurringPaid({ id, paid }) {
+    if (!db.get('SELECT id FROM recurring_payments WHERE id = ?', [id])) throw new AppError('ERR_NOT_FOUND');
+    applyPaidState(id, !!paid);
+    return { ok: true };
+  }
+
+  function deleteRecurringPayment({ id }) {
+    const p = db.get('SELECT * FROM recurring_payments WHERE id = ?', [id]);
+    if (!p) return { ok: true };
+    applyPaidState(id, false);
+    for (const r of db.all('SELECT file_path FROM recurring_files WHERE payment_id = ?', [id])) pendingRemovals.push(r.file_path);
+    db.run('DELETE FROM recurring_files WHERE payment_id = ?', [id]);
+    db.run('DELETE FROM recurring_payments WHERE id = ?', [id]);
+    return { ok: true };
+  }
+
+  // Plan silinir; ödendi kayıtlarının kasa / İnfak kayıtları kalır (para gerçekten çıktı), dekontlar silinir
+  function deleteRecurringPlan({ id }) {
+    const plan = db.get('SELECT qr_path FROM recurring_plans WHERE id = ?', [id]);
+    if (!plan) return { ok: true };
+    if (plan.qr_path) pendingRemovals.push(plan.qr_path);
+    db.run("UPDATE cash_transactions SET related_type = NULL, related_id = NULL WHERE related_type = 'recurring' AND related_id IN (SELECT id FROM recurring_payments WHERE plan_id = ?)", [id]);
+    for (const r of db.all('SELECT f.file_path FROM recurring_files f JOIN recurring_payments p ON p.id = f.payment_id WHERE p.plan_id = ?', [id])) pendingRemovals.push(r.file_path);
+    db.run('DELETE FROM recurring_files WHERE payment_id IN (SELECT id FROM recurring_payments WHERE plan_id = ?)', [id]);
+    db.run('DELETE FROM recurring_payments WHERE plan_id = ?', [id]);
+    db.run('DELETE FROM recurring_plans WHERE id = ?', [id]);
+    return { ok: true };
+  }
+
   const writes = {
     savePerson, deletePerson, togglePersonContact,
     saveCashTx, deleteCashTx, transfer, saveAccount, setAccountHidden, addReceipts, deleteReceipt,
@@ -1932,11 +2096,12 @@ function createServices(db, { removeFile = () => {} } = {}) {
     saveMeter, deleteMeter, saveReading, deleteReading,
     saveNote, pinNote, deleteNote,
     saveMaterialPlace, moveMaterialPlace, deleteMaterialPlace,
+    saveRecurringPlan, setRecurringActive, saveRecurringPayment, setRecurringPaid, deleteRecurringPayment, deleteRecurringPlan,
   };
   const reads = { nextSerial: ({ type }) => ({ serial: SERIAL[type] ? nextSerial(type) : null }), productUnitCost, accountBalance: ({ id }) => ({ balance: accountBalance(id) }), latestRates: () => latestRates(), shareDefaults, listWallets, recentWalletTx, listWalletSwaps, swapCandidates };
 
   const FILE_REFS = [['receipts', 'file_path'], ['product_images', 'file_path'], ['materials', 'image_path'], ['fixed_assets', 'image_path'], ['asset_images', 'file_path'],
-    ['trade_files', 'file_path'], ['item_codes', 'image_path'], ['internet_services', 'qr_path'], ['electricity_meters', 'photo_path'], ['electricity_readings', 'photo_path']];
+    ['trade_files', 'file_path'], ['item_codes', 'image_path'], ['internet_services', 'qr_path'], ['electricity_meters', 'photo_path'], ['electricity_readings', 'photo_path'], ['recurring_plans', 'qr_path'], ['recurring_files', 'file_path']];
   function fileInUse(rel) {
     return FILE_REFS.some(([t, c]) => {
       try { return !!db.get(`SELECT 1 AS x FROM ${t} WHERE ${c} = ? LIMIT 1`, [rel]); } catch { return false; }
