@@ -114,6 +114,8 @@ function createServices(db, { removeFile = () => {} } = {}) {
 
   function deleteTx(txId) {
     if (!txId) return;
+    const scq = db.get('SELECT sc_qr_path FROM cash_transactions WHERE id = ?', [txId])?.sc_qr_path;
+    if (scq) pendingRemovals.push(scq);
     for (const r of db.all('SELECT file_path FROM receipts WHERE transaction_id = ?', [txId])) pendingRemovals.push(r.file_path);
     db.run('DELETE FROM receipts WHERE transaction_id = ?', [txId]);
     db.run('DELETE FROM cash_transactions WHERE id = ?', [txId]);
@@ -238,7 +240,73 @@ function createServices(db, { removeFile = () => {} } = {}) {
   // ---------- Kasa ----------
 
   // add_to_cash = false: yalnızca bilgi amaçlı kayıt, kasa bakiyesini etkilemez
-  function saveCashTx({ id, account_id, direction, amount, date, category, person, people, description, add_to_cash = true, newReceipts = [], removeReceiptIds = [] }) {
+  // v1.49: Sham Cash bilgileri (yalnızca çıkışta). sc_save_payee: alıcı listesine de kaydedilir / güncellenir.
+  function saveShamCash(txId, p) {
+    if (p.sc_on === undefined && p.sc_account === undefined && p.sc_name === undefined) return; // eski arayüz: dokunma
+    const tx = db.get('SELECT direction, sc_qr_path, sc_payee_id FROM cash_transactions WHERE id = ?', [txId]);
+    if (!tx) return;
+    const on = p.sc_on !== false && tx.direction === 'out';
+    const v = {
+      account: on ? optText(p.sc_account) : null, name: on ? optText(p.sc_name) : null, phone: on ? optText(p.sc_phone) : null,
+      ref: on ? optText(p.sc_ref) : null, note: on ? optText(p.sc_note) : null, qrText: on ? optText(p.sc_qr_text) : null,
+    };
+    const qr = on ? replaceFile(tx.sc_qr_path, optText(p.sc_qr), !!p.sc_remove_qr) : replaceFile(tx.sc_qr_path, null, true);
+    let payeeId = on && p.sc_payee_id ? Number(p.sc_payee_id) || null : null;
+    if (payeeId && !db.get('SELECT id FROM shamcash_payees WHERE id = ?', [payeeId])) payeeId = null;
+    if (on && p.sc_save_payee && (v.account || v.name)) {
+      const same = payeeId ? db.get('SELECT * FROM shamcash_payees WHERE id = ?', [payeeId])
+        : v.account ? db.get('SELECT * FROM shamcash_payees WHERE account_no = ? ORDER BY id LIMIT 1', [v.account])
+          : db.get('SELECT * FROM shamcash_payees WHERE account_no IS NULL AND lower(name) = lower(?) ORDER BY id LIMIT 1', [v.name]);
+      const name = v.name || v.account;
+      // Alıcının QR'ı hareketinkinden ayrı bir kopyadır (arayüz kopyalar); biri silinince öteki kalır
+      const pq = optText(p.sc_payee_qr);
+      if (same) {
+        db.run(`UPDATE shamcash_payees SET name=?, account_no=?, phone=?, qr_path=?, qr_text=?, updated_at=${now} WHERE id=?`,
+          [name, v.account, v.phone || same.phone, pq ? replaceFile(same.qr_path, pq, false) : same.qr_path, v.qrText || same.qr_text, same.id]);
+        payeeId = same.id;
+      } else {
+        payeeId = db.run(`INSERT INTO shamcash_payees (name, account_no, phone, qr_path, qr_text, updated_at) VALUES (?,?,?,?,?,${now})`,
+          [name, v.account, v.phone, pq, v.qrText]).lastInsertRowid;
+      }
+    }
+    // Kullanım sayısı yalnızca alıcı bu harekete ilk kez bağlanınca artar (düzenlemede tekrar sayılmaz)
+    if (payeeId && on && Number(tx.sc_payee_id) !== Number(payeeId)) db.run(`UPDATE shamcash_payees SET use_count = use_count + 1, last_used = ? WHERE id = ?`, [new Date().toISOString().slice(0, 10), payeeId]);
+    db.run('UPDATE cash_transactions SET sc_account=?, sc_name=?, sc_phone=?, sc_ref=?, sc_note=?, sc_qr_path=?, sc_qr_text=?, sc_payee_id=? WHERE id=?',
+      [v.account, v.name, v.phone, v.ref, v.note, qr || null, v.qrText, on ? payeeId : null, txId]);
+  }
+
+  function saveShamPayee({ id, name, account_no, phone, note, qr, removeQr, qr_text }) {
+    const acc = optText(account_no);
+    const n = optText(name) || acc;
+    if (!n) throw new AppError('ERR_REQUIRED');
+    if (id) {
+      const old = db.get('SELECT * FROM shamcash_payees WHERE id = ?', [id]);
+      if (!old) throw new AppError('ERR_NOT_FOUND');
+      db.run(`UPDATE shamcash_payees SET name=?, account_no=?, phone=?, note=?, qr_path=?, qr_text=?, updated_at=${now} WHERE id=?`,
+        [n, acc, optText(phone), optText(note), replaceFile(old.qr_path, optText(qr), !!removeQr), qr_text === undefined ? old.qr_text : optText(qr_text), id]);
+      return { id };
+    }
+    return { id: db.run(`INSERT INTO shamcash_payees (name, account_no, phone, note, qr_path, qr_text, updated_at) VALUES (?,?,?,?,?,?,${now})`,
+      [n, acc, optText(phone), optText(note), optText(qr), optText(qr_text)]).lastInsertRowid };
+  }
+
+  // Alıcı silinince geçmiş hareketlerdeki Sham Cash bilgileri (ad, no, QR) aynen kalır
+  function deleteShamPayee({ id }) {
+    const old = db.get('SELECT qr_path FROM shamcash_payees WHERE id = ?', [id]);
+    if (!old) return { ok: true };
+    db.run('UPDATE cash_transactions SET sc_payee_id = NULL WHERE sc_payee_id = ?', [id]);
+    db.run('DELETE FROM shamcash_payees WHERE id = ?', [id]);
+    if (old.qr_path) pendingRemovals.push(old.qr_path);
+    return { ok: true };
+  }
+
+  function saveCashTx(payload) {
+    const r = saveCashTxCore(payload);
+    saveShamCash(r.id, payload);
+    return r;
+  }
+
+  function saveCashTxCore({ id, account_id, direction, amount, date, category, person, people, description, add_to_cash = true, newReceipts = [], removeReceiptIds = [] }) {
     const infoOnly = add_to_cash === false ? 1 : 0;
     const pc = peopleCols(person, people);
     if (id) {
@@ -2110,11 +2178,13 @@ function createServices(db, { removeFile = () => {} } = {}) {
     saveNote, pinNote, deleteNote,
     saveMaterialPlace, moveMaterialPlace, deleteMaterialPlace,
     saveRecurringPlan, setRecurringActive, saveRecurringPayment, setRecurringPaid, deleteRecurringPayment, deleteRecurringPlan,
+    saveShamPayee, deleteShamPayee,
   };
   const reads = { nextSerial: ({ type }) => ({ serial: SERIAL[type] ? nextSerial(type) : null }), productUnitCost, accountBalance: ({ id }) => ({ balance: accountBalance(id) }), latestRates: () => latestRates(), shareDefaults, listWallets, recentWalletTx, listWalletSwaps, swapCandidates };
 
   const FILE_REFS = [['receipts', 'file_path'], ['product_images', 'file_path'], ['materials', 'image_path'], ['fixed_assets', 'image_path'], ['asset_images', 'file_path'],
-    ['trade_files', 'file_path'], ['item_codes', 'image_path'], ['internet_services', 'qr_path'], ['electricity_meters', 'photo_path'], ['electricity_readings', 'photo_path'], ['recurring_plans', 'qr_path'], ['recurring_files', 'file_path']];
+    ['trade_files', 'file_path'], ['item_codes', 'image_path'], ['internet_services', 'qr_path'], ['electricity_meters', 'photo_path'], ['electricity_readings', 'photo_path'], ['recurring_plans', 'qr_path'], ['recurring_files', 'file_path'],
+    ['cash_transactions', 'sc_qr_path'], ['shamcash_payees', 'qr_path']];
   function fileInUse(rel) {
     return FILE_REFS.some(([t, c]) => {
       try { return !!db.get(`SELECT 1 AS x FROM ${t} WHERE ${c} = ? LIMIT 1`, [rel]); } catch { return false; }
