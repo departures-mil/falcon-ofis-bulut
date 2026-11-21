@@ -14,7 +14,7 @@ const LOCAL_SETTINGS = ['language'];
 // Aynı anda iki cihazda değişirse farkları toplanan sütunlar
 const COUNTERS = { product_stock: ['quantity'], materials: ['quantity'] };
 // Dosya yolu tutan sütunlar
-const FILE_COLUMNS = { electricity_meters: 'photo_path', electricity_readings: 'photo_path', internet_services: 'qr_path', recurring_plans: 'qr_path', recurring_files: 'file_path', receipts: 'file_path', product_images: 'file_path', materials: 'image_path', fixed_assets: 'image_path', asset_images: 'file_path', trade_files: 'file_path', item_codes: 'image_path' };
+const FILE_COLUMNS = { electricity_meters: 'photo_path', electricity_readings: 'photo_path', internet_services: 'qr_path', recurring_plans: 'qr_path', recurring_files: 'file_path', receipts: 'file_path', product_images: 'file_path', materials: 'image_path', fixed_assets: 'image_path', asset_images: 'file_path', trade_files: 'file_path', item_codes: 'image_path', cash_transactions: 'sc_qr_path', shamcash_payees: 'qr_path' };
 // v1.14: seri numaraları (aynı numara iki cihazda farklı kayda verilirse yereldeki kayda sıradaki numara verilir)
 const SERIAL_PREFIX = { products: 'U', materials: 'M', fixed_assets: 'D' };
 // Cihazda "gerçek" kayıt var mı (sadece başlangıç verileri değil) anlamak için bakılan tablolar

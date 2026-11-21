@@ -792,3 +792,35 @@ migrations.push({
     ALTER TABLE recurring_payments ADD COLUMN new_final TEXT;
   `,
 });
+
+migrations.push({
+  version: 26,
+  name: 'v1.49-sham-cash',
+  sql: `
+    -- v1.49: Kasadan çıkan paranın Sham Cash ile kime gönderildiği. Hepsi isteğe bağlı, yalnızca çıkışlarda doldurulur.
+    -- sc_account: Sham Cash hesap no / adresi, sc_name: alıcının adı, sc_phone: telefonu, sc_ref: işlem (transfer) numarası,
+    -- sc_note: not, sc_qr_path: alıcının QR kodu resmi, sc_qr_text: QR koddan okunan yazı, sc_payee_id: kayıtlı alıcıdan seçildiyse o.
+    ALTER TABLE cash_transactions ADD COLUMN sc_account TEXT;
+    ALTER TABLE cash_transactions ADD COLUMN sc_name TEXT;
+    ALTER TABLE cash_transactions ADD COLUMN sc_phone TEXT;
+    ALTER TABLE cash_transactions ADD COLUMN sc_ref TEXT;
+    ALTER TABLE cash_transactions ADD COLUMN sc_note TEXT;
+    ALTER TABLE cash_transactions ADD COLUMN sc_qr_path TEXT;
+    ALTER TABLE cash_transactions ADD COLUMN sc_qr_text TEXT;
+    ALTER TABLE cash_transactions ADD COLUMN sc_payee_id INTEGER;
+    -- Sık para gönderilen Sham Cash hesapları (listeden seçilir; seçilince bilgiler harekete kopyalanır)
+    CREATE TABLE shamcash_payees (
+      id         INTEGER PRIMARY KEY AUTOINCREMENT,
+      name       TEXT NOT NULL,
+      account_no TEXT,
+      phone      TEXT,
+      qr_path    TEXT,
+      qr_text    TEXT,
+      note       TEXT,
+      use_count  INTEGER NOT NULL DEFAULT 0,
+      last_used  TEXT,
+      created_at TEXT NOT NULL DEFAULT (datetime('now','localtime')),
+      updated_at TEXT
+    );
+  `,
+});
