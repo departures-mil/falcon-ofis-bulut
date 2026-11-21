@@ -1,0 +1,11 @@
+{
+  "ok": true,
+  "platform": "telefon",
+  "version": "1.50.0",
+  "size": 2939839,
+  "parts": 5,
+  "sha256": "86eca717d9222ae95fa3492b7823785a8a8102a378fabbb6dcd4af6adac0be31",
+  "apk": "1.50.0",
+  "publishedAt": "2026-11-21T19:11:14.322Z",
+  "removedOldParts": 0
+}
