@@ -824,3 +824,48 @@ migrations.push({
     );
   `,
 });
+
+migrations.push({
+  version: 27,
+  name: 'v1.52-cop-kutusu-gorevler',
+  sql: `
+    -- v1.52: Silinenler kutusu. Silinen kayıt (ve onunla birlikte silinen bağlı kayıtlar) 30 gün burada bekler,
+    -- tek tuşla geri gelir. rows: [{t: tablo, op: 'd' silindi | 'u' değişti, o: eski satır, n: yeni satır}] (silinme sırasıyla).
+    -- files: kayıtla birlikte silinmesi gereken dosyalar (30 gün dolunca ya da kalıcı silinince silinir).
+    -- big = 1: kayıt çok büyük olduğundan satırlar yalnız silindiği cihazda (local_trash_payload) tutulur.
+    CREATE TABLE trash_items (
+      id         INTEGER PRIMARY KEY AUTOINCREMENT,
+      action     TEXT NOT NULL,
+      kind       TEXT,
+      label      TEXT,
+      detail     TEXT,
+      row_count  INTEGER NOT NULL DEFAULT 0,
+      rows       TEXT,
+      files      TEXT,
+      big        INTEGER NOT NULL DEFAULT 0,
+      device     TEXT,
+      deleted_at TEXT NOT NULL DEFAULT (datetime('now','localtime'))
+    );
+    CREATE INDEX idx_trash_deleted ON trash_items(deleted_at);
+    -- Cihaza özel: o anki silme işleminin numarası ve tetikleyicilerin topladığı satırlar
+    CREATE TABLE local_trash_ctx (id INTEGER PRIMARY KEY, batch TEXT);
+    INSERT INTO local_trash_ctx (id, batch) VALUES (1, NULL);
+    CREATE TABLE local_trash_rows (seq INTEGER PRIMARY KEY AUTOINCREMENT, batch TEXT NOT NULL, tbl TEXT NOT NULL, op TEXT NOT NULL, old TEXT, new TEXT);
+    CREATE TABLE local_trash_payload (trash_id INTEGER PRIMARY KEY, rows TEXT);
+
+    -- Görev ve iş takibi. status: todo (yapılacak) | doing (devam ediyor) | done (bitti). priority: 0 normal, 1 yüksek, 2 acil.
+    CREATE TABLE tasks (
+      id          INTEGER PRIMARY KEY AUTOINCREMENT,
+      title       TEXT NOT NULL,
+      note        TEXT,
+      person_id   INTEGER REFERENCES people(id) ON DELETE SET NULL,
+      due_date    TEXT,
+      status      TEXT NOT NULL DEFAULT 'todo',
+      priority    INTEGER NOT NULL DEFAULT 0,
+      done_at     TEXT,
+      created_at  TEXT NOT NULL DEFAULT (datetime('now','localtime')),
+      updated_at  TEXT
+    );
+    CREATE INDEX idx_tasks_status ON tasks(status, due_date);
+  `,
+});

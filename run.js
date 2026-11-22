@@ -89,7 +89,9 @@ async function main() {
     skipFiles(db);
     const services = createServices(db, { removeFile: () => {} });
     r = await checkWallets((n, p) => services.call(n, p), (u, o) => fetch(u, o));
-    r2 = await sync.syncNow();
+    // v1.54: yeni hareket ya da bekleyen kayıt yoksa ikinci tur yapılmaz (bulut kotası)
+    const pending = db.get('SELECT COUNT(*) AS n FROM sync_outbox')?.n || 0;
+    if (pending) r2 = await sync.syncNow();
   } catch (err) {
     failed = err;
   } finally {

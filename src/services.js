@@ -415,6 +415,15 @@ function createServices(db, { removeFile = () => {} } = {}) {
       } else {
         buy = sell = positive(value, 'ERR_INVALID_RATE');
       }
+      // v1.54: internetten gelen fiyat son kayıttan %0,5'ten az farklıysa ve son kayıt 6 saatten yeniyse yazılmaz.
+      // (Program açıkken her dakika kripto fiyatı alınıyordu; her biri eşitlenen yeni bir satırdı ve bulut kotasını dolduruyordu.)
+      if (source === 'online') {
+        const last = db.get(
+          `SELECT rate, buy_rate, sell_rate, (julianday('now','localtime') - julianday(created_at)) * 24 AS age_h
+           FROM exchange_rates WHERE currency_code = ? ORDER BY id DESC LIMIT 1`, [code]);
+        const near = (x, y) => (x === null || x === undefined) ? (y === null || y === undefined) : (y !== null && y !== undefined && Math.abs(x - y) <= Math.abs(x) * 0.005);
+        if (last && last.age_h !== null && last.age_h < 6 && near(last.rate, sell ?? buy) && near(last.buy_rate ?? last.rate, buy ?? sell) && near(last.sell_rate ?? last.rate, sell ?? buy)) continue;
+      }
       db.run('INSERT INTO exchange_rates (currency_code, rate, buy_rate, sell_rate, source) VALUES (?,?,?,?,?)', [code, sell ?? buy, buy, sell, source]);
     }
     return { rates: latestRates() };
@@ -2158,6 +2167,243 @@ function createServices(db, { removeFile = () => {} } = {}) {
     return { ok: true };
   }
 
+  // ---------- v1.52: Silinenler kutusu (30 gün) ve görevler ----------
+  // Her "delete…" işlemi bir "silme paketi" açar: tetikleyiciler o işlemde silinen / değişen bütün satırları
+  // local_trash_rows'a yazar; işlem bitince hepsi tek bir trash_items kaydı olur (eşitlenir, her cihazda görünür).
+  // Geri al: satırlar aynı numaralarıyla geri yazılır, değişen alanlar eski hâline döner. Dosyalar 30 gün silinmez.
+  const TRASH_DAYS = 30;
+  const TRASH_SKIP = /^(sqlite_|sync_|local_|schema_migrations$|trash_items$|settings$)/;
+  const TRASH_MAX = 800 * 1024;
+  const TRASH_COUNTERS = { product_stock: ['quantity'], materials: ['quantity'] };
+  const TRASH_KIND = {
+    deletePerson: 'people', deleteShamPayee: 'shamcash_payees', deleteCashTx: 'cash_transactions', deleteReceipt: 'receipts',
+    deleteDebtPayment: 'debt_payments', deleteDebt: 'debts', deleteGift: 'gifts', deleteLocation: 'locations', deleteProduct: 'products',
+    deleteTradeFile: 'trade_files', deletePurchase: 'purchases', deleteSale: 'sales', deleteMaterialCategory: 'material_categories',
+    deleteMaterialMovement: 'material_movements', deleteMaterial: 'materials', deleteAsset: 'fixed_assets', deleteItemCode: 'item_codes',
+    deleteCashCategory: 'cash_categories', deleteWallet: 'crypto_wallets', deleteInternetPayment: 'internet_payments', deleteInternet: 'internet_services',
+    deleteMeter: 'electricity_meters', deleteReading: 'electricity_readings', deleteMaterialPlace: 'material_places', deleteNote: 'notes',
+    deleteRecurringPayment: 'recurring_payments', deleteRecurringPlan: 'recurring_plans', deleteTask: 'tasks',
+  };
+  const trashQi = (n) => `"${String(n).replace(/"/g, '""')}"`;
+  const trashHash = (s) => { let h = 5381; for (let i = 0; i < s.length; i++) h = ((h * 33) ^ s.charCodeAt(i)) >>> 0; return h.toString(36); };
+  let trashReady = false;
+
+  function trashTables() {
+    return db.all("SELECT name FROM sqlite_master WHERE type = 'table'").map((r) => r.name).filter((n) => !TRASH_SKIP.test(n));
+  }
+
+  // Tetikleyiciler: tablo yapısı değişince (yeni sütun) yeniden kurulur. Yalnızca bir silme paketi açıkken çalışır.
+  function installTrashTriggers() {
+    if (!db.get("SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'local_trash_ctx'")) return false;
+    const existing = new Set(db.all("SELECT name FROM sqlite_master WHERE type = 'trigger' AND name LIKE 'trash1\\_%' ESCAPE '\\'").map((r) => r.name));
+    const keep = new Set();
+    const sql = [];
+    const when = "WHEN (SELECT batch FROM local_trash_ctx WHERE id = 1) IS NOT NULL";
+    const batch = '(SELECT batch FROM local_trash_ctx WHERE id = 1)';
+    for (const t of trashTables()) {
+      const cols = db.all(`PRAGMA table_info(${trashQi(t)})`).map((c) => c.name);
+      if (!cols.length || cols.length > 60) continue;
+      const h = trashHash(cols.join(','));
+      const obj = (a) => `json_object(${cols.map((c) => `'${c.replace(/'/g, "''")}', ${a}.${trashQi(c)}`).join(', ')})`;
+      const lit = `'${t.replace(/'/g, "''")}'`;
+      const dn = `trash1_${t}_d_${h}`;
+      const un = `trash1_${t}_u_${h}`;
+      keep.add(dn); keep.add(un);
+      if (!existing.has(dn)) sql.push(`CREATE TRIGGER ${trashQi(dn)} AFTER DELETE ON ${trashQi(t)} ${when} BEGIN INSERT INTO local_trash_rows (batch, tbl, op, old) VALUES (${batch}, ${lit}, 'd', ${obj('OLD')}); END;`);
+      if (!existing.has(un)) sql.push(`CREATE TRIGGER ${trashQi(un)} AFTER UPDATE ON ${trashQi(t)} ${when} BEGIN INSERT INTO local_trash_rows (batch, tbl, op, old, new) VALUES (${batch}, ${lit}, 'u', ${obj('OLD')}, ${obj('NEW')}); END;`);
+    }
+    for (const n of existing) if (!keep.has(n)) sql.unshift(`DROP TRIGGER IF EXISTS ${trashQi(n)};`);
+    if (sql.length) db.db.exec(sql.join('\n'));
+    db.db.run('UPDATE local_trash_ctx SET batch = NULL WHERE id = 1');
+    db.db.run('DELETE FROM local_trash_rows');
+    return true;
+  }
+
+  function ensureTrash() {
+    if (!trashReady) {
+      try { trashReady = installTrashTriggers(); } catch (err) { trashReady = false; }
+    }
+    return trashReady;
+  }
+
+  function trashText(row) {
+    if (!row) return null;
+    for (const k of ['title', 'name', 'label', 'customer', 'supplier', 'description', 'original_name', 'note', 'address', 'provider', 'code']) {
+      if (typeof row[k] === 'string' && row[k].trim()) return row[k].trim().slice(0, 140);
+    }
+    return null;
+  }
+
+  function trashDetail(kind, row) {
+    if (!row) return null;
+    const parts = [];
+    const d = row.date || row.due_date || row.reading_date || row.paid_at || null;
+    if (d) parts.push(String(d).slice(0, 10));
+    let cur = row.currency || row.currency_code || null;
+    if (!cur && row.account_id) cur = db.get('SELECT currency_code FROM cash_accounts WHERE id = ?', [row.account_id])?.currency_code || null;
+    const amount = row.amount ?? row.total ?? (row.quantity != null && row.unit_price != null ? row.quantity * row.unit_price : null);
+    if (amount != null && amount !== '') parts.push(`${row.direction === 'in' ? '+' : row.direction === 'out' ? '−' : ''}${amount}${cur ? ` ${cur}` : ''}`);
+    return parts.length ? parts.join(' · ') : null;
+  }
+
+  // Silme paketini kapatır: toplanan satırları tek bir çöp kutusu kaydına çevirir. Dosyaları silmez, saklar.
+  function finishTrash(action, batch, files) {
+    const raw = db.all('SELECT tbl, op, old, new FROM local_trash_rows WHERE batch = ? ORDER BY seq', [batch]);
+    db.db.run('DELETE FROM local_trash_rows WHERE batch = ?', [batch]);
+    const rows = raw.map((r) => {
+      const x = { t: r.tbl, op: r.op, o: JSON.parse(r.old) };
+      if (r.op === 'u') x.n = JSON.parse(r.new);
+      return x;
+    }).filter((x) => x.op === 'd' || JSON.stringify(x.o) !== JSON.stringify(x.n));
+    const dels = rows.filter((x) => x.op === 'd');
+    if (!dels.length) return false;
+    const kind = TRASH_KIND[action] || dels[dels.length - 1].t;
+    const main = dels.filter((x) => x.t === kind).pop() || dels[dels.length - 1];
+    let label = trashText(main.o);
+    const nameOf = (t, id) => { try { return id ? db.get(`SELECT name FROM ${t} WHERE id = ?`, [id])?.name || null : null; } catch { return null; } };
+    if (!label) label = nameOf('products', main.o.product_id) || nameOf('materials', main.o.material_id) || nameOf('fixed_assets', main.o.asset_id)
+      || nameOf('people', main.o.person_id) || nameOf('internet_services', main.o.service_id) || nameOf('electricity_meters', main.o.meter_id) || null;
+    if (!label && main.o.debt_id) label = db.get('SELECT p.name FROM debts d LEFT JOIN people p ON p.id = d.person_id WHERE d.id = ?', [main.o.debt_id])?.name || null;
+    if (!label && kind === 'cash_transactions') label = main.o.category || null;
+    if (!label) label = `#${main.o.id ?? ''}`;
+    const fileSet = new Set(files.filter(Boolean));
+    for (const x of dels) for (const [tb, c] of FILE_REFS) if (tb === x.t && x.o[c]) fileSet.add(x.o[c]);
+    const json = JSON.stringify(rows);
+    const big = json.length > TRASH_MAX ? 1 : 0;
+    const device = typeof window !== 'undefined' && window.FalconAndroid ? 'phone' : 'desktop';
+    const id = db.run('INSERT INTO trash_items (action, kind, label, detail, row_count, rows, files, big, device) VALUES (?,?,?,?,?,?,?,?,?)',
+      [action, kind, label, trashDetail(kind, main.o), dels.length, big ? null : json, JSON.stringify([...fileSet]), big, device]).lastInsertRowid;
+    if (big) db.db.run('INSERT INTO local_trash_payload (trash_id, rows) VALUES (?, ?) ON CONFLICT(trash_id) DO UPDATE SET rows = excluded.rows', [id, json]);
+    return true;
+  }
+
+  function trashFilesInUse(rel, exceptId) {
+    if (fileInUse(rel)) return true;
+    return db.all('SELECT id, files FROM trash_items WHERE files IS NOT NULL AND id <> ?', [exceptId || 0]).some((r) => {
+      try { return (JSON.parse(r.files) || []).includes(rel); } catch { return false; }
+    });
+  }
+
+  function dropTrash(item) {
+    db.run('DELETE FROM trash_items WHERE id = ?', [item.id]);
+    db.db.run('DELETE FROM local_trash_payload WHERE trash_id = ?', [item.id]);
+    let files = [];
+    try { files = JSON.parse(item.files || '[]') || []; } catch { files = []; }
+    for (const rel of files) if (!trashFilesInUse(rel, item.id)) pendingRemovals.push(rel);
+  }
+
+  // Geri yükleme: önce silinenler (ters sırayla: üst kayıt önce), sonra değişen alanlar eski hâline.
+  function restoreTrash({ id }) {
+    const item = db.get('SELECT * FROM trash_items WHERE id = ?', [id]);
+    if (!item) throw new AppError('ERR_NOT_FOUND');
+    const json = item.big ? db.get('SELECT rows FROM local_trash_payload WHERE trash_id = ?', [id])?.rows : item.rows;
+    if (!json) throw new AppError('ERR_TRASH_OTHER_DEVICE');
+    const rows = JSON.parse(json);
+    const infoOf = {};
+    const info = (t) => infoOf[t] || (infoOf[t] = db.all(`PRAGMA table_info(${trashQi(t)})`));
+    const cols = (t) => info(t).map((c) => c.name);
+    const pkOf = (t) => { const p = info(t).filter((c) => c.pk > 0).sort((a, b) => a.pk - b.pk).map((c) => c.name); return p.length ? p : null; };
+    const where = (t, row) => { const p = pkOf(t); if (!p || p.some((k) => row[k] == null)) return null; return { sql: p.map((k) => `${trashQi(k)} = ?`).join(' AND '), params: p.map((k) => row[k]) }; };
+    let restored = 0;
+    for (const x of rows.filter((r) => r.op === 'd').reverse()) {
+      const have = cols(x.t);
+      if (!have.length) continue;
+      const row = { ...x.o };
+      const w0 = where(x.t, row);
+      if (w0 && db.get(`SELECT 1 AS x FROM ${trashQi(x.t)} WHERE ${w0.sql}`, w0.params)) continue;
+      const keys = Object.keys(row).filter((k) => have.includes(k));
+      for (let attempt = 0; ; attempt++) {
+        try {
+          db.run(`INSERT INTO ${trashQi(x.t)} (${keys.map(trashQi).join(', ')}) VALUES (${keys.map(() => '?').join(', ')})`, keys.map((k) => row[k]));
+          restored++;
+          break;
+        } catch (err) {
+          const m = /UNIQUE constraint failed: [\w"]+\.(\w+)/.exec(err.message);
+          if (m && m[1] !== 'id' && typeof row[m[1]] === 'string' && attempt < 4) {
+            row[m[1]] = `${row[m[1]].replace(/ \(\d+\)$/, '')} (${attempt + 2})`;
+            continue;
+          }
+          if (m && m[1] === 'id') break;
+          if (/UNIQUE constraint failed/.test(err.message) && attempt === 0) break;
+          throw err;
+        }
+      }
+    }
+    for (const x of rows.filter((r) => r.op === 'u').reverse()) {
+      const have = cols(x.t);
+      const w1 = have.length ? where(x.t, x.o) : null;
+      if (!w1) continue;
+      const cur = db.get(`SELECT * FROM ${trashQi(x.t)} WHERE ${w1.sql}`, w1.params);
+      if (!cur) continue;
+      const set = [];
+      const vals = [];
+      for (const k of Object.keys(x.o)) {
+        if (!have.includes(k) || (pkOf(x.t) || []).includes(k) || x.o[k] === x.n[k]) continue;
+        if ((TRASH_COUNTERS[x.t] || []).includes(k) && typeof x.o[k] === 'number' && typeof x.n[k] === 'number') {
+          set.push(`${trashQi(k)} = ?`); vals.push((Number(cur[k]) || 0) + (x.o[k] - x.n[k]));
+        } else if (cur[k] === x.n[k]) {
+          set.push(`${trashQi(k)} = ?`); vals.push(x.o[k]);
+        }
+      }
+      if (set.length) db.run(`UPDATE ${trashQi(x.t)} SET ${set.join(', ')} WHERE ${w1.sql}`, [...vals, ...w1.params]);
+    }
+    db.run('DELETE FROM trash_items WHERE id = ?', [id]);
+    db.db.run('DELETE FROM local_trash_payload WHERE trash_id = ?', [id]);
+    return { ok: true, restored };
+  }
+
+  function purgeTrash({ id }) {
+    const item = db.get('SELECT id, files FROM trash_items WHERE id = ?', [id]);
+    if (!item) return { ok: true };
+    dropTrash(item);
+    return { ok: true };
+  }
+
+  function emptyTrash() {
+    const items = db.all('SELECT id, files FROM trash_items');
+    for (const it of items) dropTrash(it);
+    return { ok: true, count: items.length };
+  }
+
+  function purgeOldTrash({ days = TRASH_DAYS } = {}) {
+    const items = db.all(`SELECT id, files FROM trash_items WHERE deleted_at < datetime('now','localtime', ?)`, [`-${Math.max(1, Number(days) || TRASH_DAYS)} days`]);
+    for (const it of items) dropTrash(it);
+    return { ok: true, count: items.length };
+  }
+
+  // Görevler
+  const TASK_STATUS = ['todo', 'doing', 'done'];
+  function saveTask({ id, title, note, person, person_id, due_date, status, priority }) {
+    const t = optText(title);
+    if (!t) throw new AppError('ERR_REQUIRED');
+    const st = TASK_STATUS.includes(status) ? status : 'todo';
+    const pr = [0, 1, 2].includes(Number(priority)) ? Number(priority) : 0;
+    const pid = person_id ? Number(person_id) : resolvePerson(typeof person === 'string' ? { name: person } : person);
+    const due = optText(due_date);
+    const n = typeof note === 'string' && note.trim() ? note.replace(/\s+$/, '') : null;
+    if (id) {
+      const old = db.get('SELECT status FROM tasks WHERE id = ?', [id]);
+      if (!old) throw new AppError('ERR_NOT_FOUND');
+      const doneAt = st === 'done' ? (old.status === 'done' ? undefined : true) : null;
+      db.run(`UPDATE tasks SET title=?, note=?, person_id=?, due_date=?, status=?, priority=?, updated_at=${now}${doneAt === true ? `, done_at=${now}` : doneAt === null ? ', done_at=NULL' : ''} WHERE id=?`, [t, n, pid, due, st, pr, id]);
+      return { id };
+    }
+    return { id: db.run(`INSERT INTO tasks (title, note, person_id, due_date, status, priority, done_at, updated_at) VALUES (?,?,?,?,?,?,${st === 'done' ? now : 'NULL'},${now})`, [t, n, pid, due, st, pr]).lastInsertRowid };
+  }
+
+  function setTaskStatus({ id, status }) {
+    if (!TASK_STATUS.includes(status)) throw new AppError('ERR_INVALID');
+    const old = db.get('SELECT status FROM tasks WHERE id = ?', [id]);
+    if (!old) throw new AppError('ERR_NOT_FOUND');
+    db.run(`UPDATE tasks SET status=?, updated_at=${now}, done_at=${status === 'done' ? (old.status === 'done' ? 'done_at' : now) : 'NULL'} WHERE id=?`, [status, id]);
+    return { ok: true };
+  }
+
+  function deleteTask({ id }) {
+    db.run('DELETE FROM tasks WHERE id = ?', [id]);
+    return { ok: true };
+  }
+
   const writes = {
     savePerson, deletePerson, togglePersonContact,
     saveCashTx, deleteCashTx, transfer, saveAccount, setAccountHidden, addReceipts, deleteReceipt,
@@ -2179,6 +2425,8 @@ function createServices(db, { removeFile = () => {} } = {}) {
     saveMaterialPlace, moveMaterialPlace, deleteMaterialPlace,
     saveRecurringPlan, setRecurringActive, saveRecurringPayment, setRecurringPaid, deleteRecurringPayment, deleteRecurringPlan,
     saveShamPayee, deleteShamPayee,
+    restoreTrash, purgeTrash, emptyTrash, purgeOldTrash,
+    saveTask, setTaskStatus, deleteTask,
   };
   const reads = { nextSerial: ({ type }) => ({ serial: SERIAL[type] ? nextSerial(type) : null }), productUnitCost, accountBalance: ({ id }) => ({ balance: accountBalance(id) }), latestRates: () => latestRates(), shareDefaults, listWallets, recentWalletTx, listWalletSwaps, swapCandidates };
 
@@ -2197,7 +2445,32 @@ function createServices(db, { removeFile = () => {} } = {}) {
     const fn = writes[name];
     if (!fn) throw new AppError('ERR_UNKNOWN_ACTION');
     pendingRemovals.length = 0;
-    const result = db.tx(() => fn(payload));
+    let result;
+    if (name === 'restoreTrash') {
+      // Geri yüklenen satırların sırası yabancı anahtarlara takılmasın (üst kayıt sonradan silinmiş olabilir)
+      db.db.run('PRAGMA foreign_keys = OFF');
+      try {
+        result = db.tx(() => fn(payload));
+      } finally {
+        db.db.run('PRAGMA foreign_keys = ON');
+      }
+    } else if (/^delete/.test(name) && ensureTrash()) {
+      const batch = `${Date.now().toString(36)}${Math.random().toString(36).slice(2, 8)}`;
+      result = db.tx(() => {
+        db.db.run('UPDATE local_trash_ctx SET batch = ? WHERE id = 1', [batch]);
+        let r;
+        try {
+          r = fn(payload);
+        } finally {
+          db.db.run('UPDATE local_trash_ctx SET batch = NULL WHERE id = 1');
+        }
+        // Silinen kaydın dosyaları 30 gün saklanır (çöp kutusundan geri gelebilsin)
+        if (finishTrash(name, batch, pendingRemovals.slice())) pendingRemovals.length = 0;
+        return r;
+      });
+    } else {
+      result = db.tx(() => fn(payload));
+    }
     for (const rel of pendingRemovals.splice(0)) {
       // v1.33: aynı dosyayı başka kayıt (ör. aktarılan ürün / demirbaş) hâlâ kullanıyorsa silinmez
       if (fileInUse(rel)) continue;
@@ -2208,6 +2481,18 @@ function createServices(db, { removeFile = () => {} } = {}) {
       }
     }
     return result;
+  }
+
+  // Açılışta: tetikleyicileri kur, 30 günü dolan çöp kutusu kayıtlarını temizle (sonra her 6 saatte bir)
+  try {
+    ensureTrash();
+    const tick = () => { try { if (db.get("SELECT 1 AS x FROM sqlite_master WHERE name = 'trash_items'")) call('purgeOldTrash', {}); } catch { /* sonra tekrar */ } };
+    const t1 = setTimeout(tick, 20000);
+    const t2 = setInterval(tick, 6 * 3600 * 1000);
+    if (t1 && t1.unref) t1.unref();
+    if (t2 && t2.unref) t2.unref();
+  } catch {
+    // eski veritabanı: tablo yoksa çöp kutusu devre dışı
   }
 
   return { call, ...writes, ...reads };
