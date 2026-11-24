@@ -15,6 +15,7 @@ const PART_SIZE = 700 * 1024;
 const PLATFORMS = ['masaustu', 'telefon'];
 const PUBLIC_KEY_B64 = 'MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAEEbrTSFXxCh3+tEsrvxW5N7z2DVUxv7s0ZsdUfeDpeDL/yTJxtvy1Lo+KmsiPpMXuB6hsMQDiMuIERM2so2DKmw==';
 const env = (k) => (process.env[k] || '').trim();
+require('../araclar/eposta').ensureEmail(); // e-posta depoda açık yazılmaz (yayin/eposta.enc.json)
 
 const sha256 = (b) => crypto.createHash('sha256').update(b).digest('hex');
 function verify(platform, version, hash, sig) {

@@ -4,6 +4,7 @@
 // yerde bulunsa bile kayıt numarası işlemden türetildiği için çift kayıt oluşmaz.
 // Kayıt defteri (sql.js) şifrelenip Actions önbelleğinde saklanır; her turda yalnız yenilikler çekilir.
 const fs = require('fs');
+require('./araclar/eposta').ensureEmail(); // e-posta depoda açık yazılmaz (yayin/eposta.enc.json)
 const path = require('path');
 const crypto = require('crypto');
 const { Database } = require('./src/db');

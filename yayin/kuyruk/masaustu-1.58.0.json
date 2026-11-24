@@ -1,0 +1,9 @@
+{
+  "platform": "masaustu",
+  "version": "1.58.0",
+  "notes": "Yeni: güncellemeler artık GitHub sürümlerinden, yalnızca değişen kısımlar indirilerek gelir. Bu güncellemeden sonra program dosyaları bir kez yenilenir (\"Yeni kurulum gerekli\" penceresi). Kayıtlar, belgeler, PIN ve eşitleme bağlantısı korunur.",
+  "file": "masaustu-1.58.0.fopk",
+  "sha256": "06b0accadd6c2a1dc34dd26e52191010d2f5c88076fb4a1703f8c79f43b49087",
+  "sig": "MEYCIQDHFMgB9jeZsj5TZyRYYwK7obU2FWtWTS7aAceFUpr57wIhAK9OR2AgzcSwZ564E6YCEOO/BeJEnZms4C9Jm8oo+62u",
+  "electron": "44"
+}
