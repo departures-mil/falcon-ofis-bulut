@@ -1,0 +1,11 @@
+{
+  "ok": true,
+  "platform": "masaustu",
+  "version": "1.58.0",
+  "size": 3283645,
+  "parts": 5,
+  "sha256": "06b0accadd6c2a1dc34dd26e52191010d2f5c88076fb4a1703f8c79f43b49087",
+  "apk": null,
+  "publishedAt": "2026-11-24T14:11:28.435Z",
+  "removedOldParts": 4
+}
