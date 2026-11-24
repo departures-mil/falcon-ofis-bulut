@@ -1,3 +1,5 @@
+// DEVRE DIŞI (2026-11-24): güncellemeler yalnız GitHub Releases'ten gelir; bu betiği çalıştıran yayin.yml kaldırıldı.
+// Firebase'de guncellemeler/masaustu belgesinde son kez Falcon Ofis 1.58.0 köprüsü duruyor.
 // Falcon Ofis güncelleme yayıncısı (GitHub Actions).
 // yayin/kuyruk/ klasörüne gönderilen imzalı paketleri (.fopk + .json [+ .apk]) Firebase'deki
 // guncellemeler/<platform> belgesine yükler. Programın bilgisayarda açık olması gerekmez.

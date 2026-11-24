@@ -27,7 +27,6 @@ jobs:
       - name: Cüzdanları kontrol et ve eşitle
         run: node run.js
         env:
-          FALCON_EMAIL: yonetici@example.invalid
           FALCON_PASSWORD: ${{ secrets.FALCON_PASSWORD }}
       - name: Kayıt defterini sakla
         if: always() && hashFiles('veri/falcon.db.enc') != ''
