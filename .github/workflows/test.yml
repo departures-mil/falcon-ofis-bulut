@@ -1,0 +1,19 @@
+# Para hareketi testleri: her değişiklikte çalışır (ağ kullanmaz). Testler geçmezse kırmızı görünür ve günlük raporda listelenir.
+name: Testler
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - run: npm install --no-audit --no-fund
+      - run: npm test

@@ -4,7 +4,7 @@
 // yerde bulunsa bile kayıt numarası işlemden türetildiği için çift kayıt oluşmaz.
 // Kayıt defteri (sql.js) şifrelenip Actions önbelleğinde saklanır; her turda yalnız yenilikler çekilir.
 const fs = require('fs');
-require('./araclar/eposta').ensureEmail(); // e-posta depoda açık yazılmaz (yayin/eposta.enc.json)
+if (require.main === module) require('./araclar/eposta').ensureEmail(); // e-posta depoda açık yazılmaz (yayin/eposta.enc.json)
 const path = require('path');
 const crypto = require('crypto');
 const { Database } = require('./src/db');
@@ -12,8 +12,9 @@ const { createServices } = require('./src/services');
 const { checkWallets } = require('./src/wallets');
 const { createSync, FirebaseClient } = require('./src/sync');
 const firebaseConfig = require('./src/firebase-config');
+const bildirim = require('./bildirim');
 
-const DIR = path.join(__dirname, 'veri');
+const DIR = process.env.FALCON_VERI_DIR || path.join(__dirname, 'veri');
 const DB = path.join(DIR, 'falcon.db');
 const ENC = path.join(DIR, 'falcon.db.enc');
 const env = (k) => (process.env[k] || '').trim();
@@ -93,6 +94,11 @@ async function main() {
     // v1.54: yeni hareket ya da bekleyen kayıt yoksa ikinci tur yapılmaz (bulut kotası)
     const pending = db.get('SELECT COUNT(*) AS n FROM sync_outbox')?.n || 0;
     if (pending) r2 = await sync.syncNow();
+    // Telegram (secret'lar tanımlıysa): yeni hareket ve yeni çıkan cüzdan hatası bildirilir; aynı hata tekrar tekrar gönderilmez
+    if (bildirim.ayarli()) {
+      if (r.added.length) await bildirim.gonder(bildirim.hareketMesaji(r));
+      if (bildirim.yeniHataMi(db, r)) await bildirim.gonder(bildirim.cuzdanMesaji(r));
+    }
   } catch (err) {
     failed = err;
   } finally {
@@ -106,7 +112,12 @@ async function main() {
   if (r.errors.length) console.log('hatalı cüzdan türleri:', r.errors.map((e) => `${e.kind}:${e.error}`).join(', '));
 }
 
-main().catch((err) => {
-  console.error('HATA', err.code || '', String(err.message || err).slice(0, 300));
-  process.exit(1);
-});
+if (require.main === module) {
+  main().catch(async (err) => {
+    console.error('HATA', err.code || '', String(err.message || err).slice(0, 300));
+    await bildirim.gonder(bildirim.hataMesaji(err));
+    process.exit(1);
+  });
+}
+
+module.exports = { keyBytes, encrypt, decrypt, DB, ENC };

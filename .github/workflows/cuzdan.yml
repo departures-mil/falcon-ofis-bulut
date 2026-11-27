@@ -28,6 +28,9 @@ jobs:
         run: node run.js
         env:
           FALCON_PASSWORD: ${{ secrets.FALCON_PASSWORD }}
+          # İsteğe bağlı: tanımlıysa hata ve yeni hareket Telegram'a bildirilir (tutar / adres yazılmaz)
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
       - name: Kayıt defterini sakla
         if: always() && hashFiles('veri/falcon.db.enc') != ''
         uses: actions/cache/save@v4
